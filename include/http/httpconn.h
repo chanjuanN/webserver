@@ -5,8 +5,8 @@
     3. 主状态机根据从状态机状态，更新自身状态，决定响应请求还是继续读取数据
  */
 
-#ifndef HTTPCOON_H
-#define HTTPCOON_H
+#ifndef HttpConn_H
+#define HttpConn_H
 
 #include <netinet/in.h>
 #include <string>
@@ -20,9 +20,10 @@
 #include <sys/socket.h>
 #include <errno.h>
 #include "locker.h"
-#include <mysql/mysql.h> //todo 引用我的连接池,连接池中包含这个头文件
+#include "sqlconnpool.h"
 #include <sys/mman.h>
 #include <sys/uio.h>
+#include "log.h"
 
 //todo很多还没添加,用的时候添加
 // #include <sys/types.h>
@@ -31,7 +32,7 @@
 
 using namespace std;
 
-class HttpCoon {
+class HttpConn {
 public:
     static const int FILENAME_LEN = 200;
     static const int READ_BUFFER_SIZE = 2048;
@@ -77,8 +78,8 @@ public:
     };
 
 public:
-    HttpCoon();
-    ~HttpCoon();
+    HttpConn();
+    ~HttpConn();
 
     void init(int sockfd, const sockaddr_in &addr, char* root, int TrigMode, int closeLog, string user, string passwd, string sqlname);
     void closeConn(bool realClose = true);//缺省参数赋值尽量写在声明中,不要写在定义中
@@ -86,7 +87,7 @@ public:
     bool readOnce();
     bool write();
     sockaddr_in* getAddress();//获取ip地址
-    void initMysqlResult();//todo
+    void initMysqlResult(ConnectionPool* connPool);
 
 private:
     void init();
@@ -114,7 +115,7 @@ public:
     int m_improv;//reactor模式下工作线程已经做完了io操作
     static int m_epollfd;
     static int m_userCount;
-    MYSQL* m_mysql;//todo
+    MYSQL* m_mysql;
     int m_reactorState;//读为0,写为1
 
 private:

@@ -1,11 +1,12 @@
 #include "threadpool.h"
 
 template <typename T>
-Threadpool<T>::Threadpool(int concurrencyModel, int threadNum = 8, int maxRequest = 10000):
+Threadpool<T>::Threadpool(int concurrencyModel, ConnectionPool* connpool, int threadNum, int maxRequest):
     m_concurrencyModel(concurrencyModel), 
     m_threadNum(threadNum),
     m_maxRequest(maxRequest),
-    m_threads(nullptr) {
+    m_threads(nullptr),
+    m_connPool(connpool) {
     if(threadNum<=0 || maxRequest<=0) {
         throw std::exception();
     }
@@ -71,7 +72,7 @@ bool Threadpool<T>::appendProactor(T* request) { //proactor模式下追加任务
 template<typename T>
 void* Threadpool<T>::worker(void* arg) { //工作线程运行的函数，不断从工作队列中取出任务并执行
     Threadpool* pool = (Threadpool* )arg;
-    pool->run;
+    pool->run();
     return pool;
 }
 
@@ -95,25 +96,30 @@ void Threadpool<T>::run() { //worker中实际执行任务的函数
         if(1==m_concurrencyModel) { //reactor模式 工作线程负责io
             if(0==request->m_reactorState) { //读请求
                 if(request->readOnce()) {
-                    request->improv = 1;
-                    //连接数据库操作 todo
+                    request->m_improv = 1;
+                    //连接数据库操作
+                    ConnectionRAII mysqlConn(&request->m_mysql, m_connPool);
                     request->process();//处理请求
                 } else {
-                    request->improv = 1;
-                    request->timerFlag = 1;//处理定时器任务
+                    request->m_improv = 1;
+                    request->m_timerFlag = 1;//处理定时器任务
                 }
             } else { //写请求
                 if(request->write()) {
-                    request->improv = 1;
+                    request->m_improv = 1;
                 } else {
-                    request->improv = 1;
-                    request->timerFlag = 1;
+                    request->m_improv = 1;
+                    request->m_timerFlag = 1;
                 }
             }
         } else { //proactor模式
-            //连接数据库 todo
+            //连接数据库
+            ConnectionRAII mysqlConn(&request->m_mysql, m_connPool);
             request->process();//只可能出现处理请求任务，因为io操作在主线程中完成
         }
 
     }
 }
+
+//模板实例化
+template class Threadpool<HttpConn>;

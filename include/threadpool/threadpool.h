@@ -12,11 +12,14 @@
 #include <list>
 #include "locker.h"
 #include <exception>
+#include "sqlconnpool.h"
+#include "httpconn.h"
+#include "log.h"
 
 template<typename T> //任务类型
 class Threadpool {
 public:
-    Threadpool(int concurrencyModel, int threadNum = 8, int maxRequest = 10000);
+    Threadpool(int concurrencyModel, ConnectionPool* connpool, int threadNum = 8, int maxRequest = 10000);
     ~Threadpool();
     bool append(T* request, int reactorState);//reactor模式下往请求队列中追加任务，reactorState标记是读/写任务
     bool appendProactor(T* request);//proactor模式下追加任务到请求队列
@@ -34,6 +37,7 @@ private:
     Locker m_queueLocker; //保护请求队列的互斥锁
     Sem m_queueState;  //是否有任务需要处理，初值为0，刚开始没有任务需要处理
     int m_concurrencyModel; //并发模式，1：reactor
+    ConnectionPool* m_connPool;//连接池
 };
 
 #endif

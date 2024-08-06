@@ -58,15 +58,14 @@ void modFd(int epollfd, int fd, int events, int TrigMode) {
 }
 
 //静态成员变量,类内声明,类外初始化
-int HttpCoon::m_userCount = 0;
-int HttpCoon::m_epollfd = -1;
+int HttpConn::m_userCount = 0;
+int HttpConn::m_epollfd = -1;
 
-HttpCoon::HttpCoon() {}
+HttpConn::HttpConn() {}
 
-HttpCoon::~HttpCoon() {}
+HttpConn::~HttpConn() {}
 
-//初始化http连接 todo
-void HttpCoon::init(int sockfd, const sockaddr_in &addr, char* root, int TrigMode, int closeLog, string user, string passwd, string sqlname) {
+void HttpConn::init(int sockfd, const sockaddr_in &addr, char* root, int TrigMode, int closeLog, string user, string passwd, string sqlname) {
     //当浏览器出现连接重置时,可能是网站根目录出错或者http响应格式出错或者访问的文件中内容完全为空
     m_docRoot = root;
     m_TrigMode = TrigMode;
@@ -86,12 +85,12 @@ void HttpCoon::init(int sockfd, const sockaddr_in &addr, char* root, int TrigMod
 }
 
 //初始化其他变量
-void HttpCoon::init() {
-    // m_mysql = nullptr; todo
+void HttpConn::init() {
+    m_mysql = nullptr; 
     m_bytesToSend = 0;
     m_bytesHaveSend = 0;
     m_checkState = CHECK_STATE_REQUESTLINE;
-    m_linger = false;//todo
+    m_linger = false;//保持连接/长连接？
     m_method = GET;
     m_url = nullptr;
     m_version = nullptr;
@@ -112,7 +111,7 @@ void HttpCoon::init() {
 }
 
 //关闭一个连接,客户数减一
-void HttpCoon::closeConn(bool realClose) {
+void HttpConn::closeConn(bool realClose) {
     if(realClose && (m_sockfd!=-1)) {
         printf("close %d\n", m_sockfd);
         delFd(m_epollfd, m_sockfd);
@@ -121,7 +120,7 @@ void HttpCoon::closeConn(bool realClose) {
     }
 }
 
-void HttpCoon::process() {
+void HttpConn::process() {
     HTTP_CODE readRet = processRead();
     if(readRet==NO_REQUEST) {
         modFd(m_epollfd, m_sockfd, EPOLLIN, m_TrigMode);
@@ -138,7 +137,7 @@ void HttpCoon::process() {
 
 //循环读取客户数据，直到无数据可读或对方关闭连接
 //非阻塞ET工作模式下，需要一次性将数据读完,因为只触发一次
-bool HttpCoon::readOnce() {
+bool HttpConn::readOnce() {
     if(m_readIdx>=READ_BUFFER_SIZE) {
         return false;
     }
@@ -175,7 +174,7 @@ bool HttpCoon::readOnce() {
     }
 }
 
-bool HttpCoon::write() {
+bool HttpConn::write() {
     int temp = 0;
     if(m_bytesToSend==0) {
         modFd(m_epollfd, m_sockfd, EPOLLIN, m_TrigMode);
@@ -222,13 +221,29 @@ bool HttpCoon::write() {
     }
 }
 
-sockaddr_in* HttpCoon::getAddress() {
+sockaddr_in* HttpConn::getAddress() {
     return &m_address;
 }
 
-// void HttpCoon::initMysqlResult();//todo
+void HttpConn::initMysqlResult(ConnectionPool* connPool) {
+    // 先从连接池中取一个连接
+    MYSQL* mysql = nullptr;
+    ConnectionRAII mysqlcon(&mysql, connPool);//connectionRAII 是一个 RAII 类,用于自动管理 MySQL 连接的生命周期。当 mysqlcon 对象被销毁时,它会自动将 mysql 连接归还到连接池中。
+    //在user表中检索username，passwd数据，浏览器端输入
+    if(mysql_query(mysql, "SELECT username, passwd FROM user")) {
+        LOG_ERROR("SELECT error: %s\n", mysql_error(mysql));
+    }
+    //从表中检索完整的结果集
+    MYSQL_RES* res = mysql_store_result(mysql);
+    //从结果集中获取下一行，将对应的用户名和密码，存入map中
+    while(MYSQL_ROW row=mysql_fetch_row(res)) {
+        string temp1(row[0]);
+        string temp2(row[1]);
+        m_users[temp1] = temp2;
+    }
+}
 
-HttpCoon::HTTP_CODE HttpCoon::processRead() {
+HttpConn::HTTP_CODE HttpConn::processRead() {
     LINE_STATUS lineStatus = LINE_OK;
     HTTP_CODE ret = NO_REQUEST;
     char* text = nullptr;
@@ -236,7 +251,7 @@ HttpCoon::HTTP_CODE HttpCoon::processRead() {
     while((m_checkState==CHECK_STATE_CONTENT && lineStatus==LINE_OK) || ((lineStatus=parseLine())==LINE_OK)) {
         text = getLine();
         m_startLine = m_checkedIdx;
-        // LOG_INFO("%s", text); todo
+        LOG_INFO("%s", text);
 
         switch(m_checkState) {
             case CHECK_STATE_REQUESTLINE: {
@@ -270,7 +285,7 @@ HttpCoon::HTTP_CODE HttpCoon::processRead() {
     return NO_REQUEST;
 }
 
-bool HttpCoon::processWrite(HTTP_CODE ret) {
+bool HttpConn::processWrite(HTTP_CODE ret) {
     switch(ret) {
         case INTERNAL_ERROR: {
             addStatusLine(500, error500Title);
@@ -338,7 +353,7 @@ username=admin&password=123456
 */
 
 //解析http请求行(如POST /login.php HTTP/1.1),获得请求方法,目标url,及http版本
-HttpCoon::HTTP_CODE HttpCoon::parseRequestLine(char* text) {
+HttpConn::HTTP_CODE HttpConn::parseRequestLine(char* text) {
     m_url = strpbrk(text, " \t"); //返回第一个指向空格/\t的指针
     if(!m_url) {
         return BAD_REQUEST;
@@ -385,7 +400,7 @@ HttpCoon::HTTP_CODE HttpCoon::parseRequestLine(char* text) {
 }
 
 //解析http请求的一个头部信息
-HttpCoon::HTTP_CODE HttpCoon::parseHeaders(char* text) {
+HttpConn::HTTP_CODE HttpConn::parseHeaders(char* text) {
     if(text[0]=='\0') {
         //空行
         if(m_contentLength!=0) {
@@ -410,13 +425,13 @@ HttpCoon::HTTP_CODE HttpCoon::parseHeaders(char* text) {
         text += strspn(text, " \t");
         m_host = text;
     } else {
-        // LOG_INFO("oop! unknown header: %s", text); todo
+        LOG_INFO("oop! unknown header: %s", text);
     }
     return NO_REQUEST;
 }
 
 //判断http请求是否被完整读入
-HttpCoon::HTTP_CODE HttpCoon::parseContent(char* text) {
+HttpConn::HTTP_CODE HttpConn::parseContent(char* text) {
     if(m_readIdx>=(m_contentLength+m_checkedIdx)) {
         text[m_contentLength] = '\0';
         //post请求中最后为输入的用户名和密码
@@ -428,65 +443,69 @@ HttpCoon::HTTP_CODE HttpCoon::parseContent(char* text) {
 }
 
 
-HttpCoon::HTTP_CODE HttpCoon::doRequest() {
+HttpConn::HTTP_CODE HttpConn::doRequest() {
     strcpy(m_realFile, m_docRoot);
     int len = strlen(m_docRoot);
-    printf("m_url: %s\n", m_url);//todo 删除
+    // printf("m_url: %s\n", m_url);
     const char* p = strrchr(m_url, '/');//在一个字符串中从后向前搜索指定的字符,并返回该字符最后出现的位置。
 
-    // if(m_cgi==1 && (*(p+1)=='2' || *(p+1)=='3')) { //现在不用cgi,这个变量可以删除,感觉.todo
-    //将用户名和密码提取出来
-    //user=123&password=123        
-    char name[100];
-    char password[100];
-    int i;
-    for(i=5; m_string[i]!='&'; i++) {
-        name[i-5] = m_string[i];
-    }
-    name[i-5] = '\0';
+    if((*(p+1)=='2' || *(p+1)=='3')) { //现在不用cgi,这个变量可以删除,感觉.todo
+        //将用户名和密码提取出来
+        //user=123&password=123        
+        char name[100];
+        char password[100];
+        int i;
+        // printf("m_string = %s\n", m_string);
+        for(i=5; m_string[i]!='&'; i++) {
+            name[i-5] = m_string[i];
+        }
+        name[i-5] = '\0';
 
-    int j = 0;
-    for(i=i+10; m_string[i]!='\0'; i++) {
-        password[j] = m_string[i];
-    }
-    password[j] = '\0';
+        int j = 0;
+        for(i=i+10; m_string[i]!='\0'; i++) {
+            password[j] = m_string[i];
+        }
+        password[j] = '\0';
     
-    //处理post,注册/登陆,更改m_url内容
-    if(*(p+1)=='3') {
-        //注册
-        char* sqlInsert = (char* )malloc(sizeof(char)*200);
-        strcpy(sqlInsert, "INSERT INTO user(username, passwd) VALUES(");
-        strcat(sqlInsert, "'");
-        strcat(sqlInsert, name);
-        strcat(sqlInsert, "', '");
-        strcat(sqlInsert, password);
-        strcat(sqlInsert, "')");
+        //处理post,注册/登陆,更改m_url内容
+        if(*(p+1)=='3') {
+            //注册
+            char* sqlInsert = (char* )malloc(sizeof(char)*200);
+            strcpy(sqlInsert, "INSERT INTO user(username, passwd) VALUES(");
+            strcat(sqlInsert, "'");
+            strcat(sqlInsert, name);
+            strcat(sqlInsert, "', '");
+            strcat(sqlInsert, password);
+            strcat(sqlInsert, "')");
 
-        //先在map表中查是否重名
-        if(m_users.find(name)==m_users.end()) {
-            m_lock.lock();
-            /* mysql_query() 是一个用于执行 SQL 查询的函数，在旧版的 MySQL C API 中使用。它可以执行任何类型的 SQL 语句，不仅限于查询语句（SELECT），
-            还可以执行插入（INSERT）、更新（UPDATE）、删除（DELETE）、创建表（CREATE TABLE）等。 */
-            //执行mysql语句，新用户数据插入数据库表中
-            int res = mysql_query(m_mysql, sqlInsert); //todo
-            m_users.insert(pair<string, string>(name, password));//更新map表
-            m_lock.unlock();
+            //先在map表中查是否重名
+            if(m_users.find(name)==m_users.end()) {
+                m_lock.lock();
+                /* mysql_query() 是一个用于执行 SQL 查询的函数，在旧版的 MySQL C API 中使用。它可以执行任何类型的 SQL 语句，不仅限于查询语句（SELECT），
+                还可以执行插入（INSERT）、更新（UPDATE）、删除（DELETE）、创建表（CREATE TABLE）等。 */
+                //执行mysql语句，新用户数据插入数据库表中
+                int res = mysql_query(m_mysql, sqlInsert); 
+                m_users.insert(pair<string, string>(name, password));//更新map表
+                m_lock.unlock();
 
-            if(!res) {
-                strcpy(m_url, "/log.html");//注册成功返回登陆页面
+                if(!res) {
+                    strcpy(m_url, "/log.html");//注册成功返回登陆页面
+                } else {
+                    strcpy(m_url, "registerError.html");//注册失败返回注册失败页面
+                }
             } else {
-                strcpy(m_url, "registerError.html");//注册失败返回注册失败页面
+                strcpy(m_url, "registerError.html");//重名返回注册失败
             }
-        } else {
-            strcpy(m_url, "registerError.html");//重名返回注册失败
-        }
-    } else if(*(p+1)=='2') { //登陆, 直接在map表中校验信息
-        if(m_users.find(name)!=m_users.end() && m_users[name]==password) {
-            strcpy(m_url, "/welcome.html");//登陆成功
-        } else {
-            strcpy(m_url, "/logError.html");//登陆失败
-        }
-    } else if(*(p+1)=='0') { //以下都是get方法处理,返回所要资源,路经: m_realFile
+        } else if(*(p+1)=='2') { //登陆, 直接在map表中校验信息
+            if(m_users.find(name)!=m_users.end() && m_users[name]==password) {
+                strcpy(m_url, "/welcome.html");//登陆成功
+            } else {
+                strcpy(m_url, "/logError.html");//登陆失败
+            }
+        } 
+    }
+    
+    if(*(p+1)=='0') { //以下都是get方法处理,返回所要资源,路经: m_realFile
         char* urlReal = (char*)malloc(sizeof(char)*200);
         strcpy(urlReal, "/register.html");
         strncpy(m_realFile+len, urlReal, strlen(urlReal));
@@ -543,13 +562,13 @@ HttpCoon::HTTP_CODE HttpCoon::doRequest() {
 }
 
 //获取一行情求文本
-char* HttpCoon::getLine() {
+char* HttpConn::getLine() {
     return m_readBuf + m_startLine;
 }
 
 //从状态机，用于分析出一行内容,在 HTTP 协议中,一个完密码整的行由两个字符组成: '\r' (回车) 和 '\n' (换行)。
 //返回值为行的读取状态，有LINE_OK,LINE_BAD,LINE_OPEN
-HttpCoon::LINE_STATUS HttpCoon::parseLine() {
+HttpConn::LINE_STATUS HttpConn::parseLine() {
     char temp;
     for(; m_checkedIdx<m_readIdx; m_checkedIdx++) {
         temp = m_readBuf[m_checkedIdx];
@@ -578,7 +597,7 @@ HttpCoon::LINE_STATUS HttpCoon::parseLine() {
     return LINE_OPEN;
 }
 
-void HttpCoon::unmap() {
+void HttpConn::unmap() {
     if(m_fileAddress) {
         munmap(m_fileAddress, m_fileStat.st_size);
         m_fileAddress = nullptr;
@@ -590,7 +609,7 @@ void HttpCoon::unmap() {
     // format 参数是 "%s %d %s\r\n"。
     // argList 是可变参数列表,包含 "HTTP/1.1", status, title 三个参数。
 //写到writeBuf中, 发送给sockfd的写缓冲区
-bool HttpCoon::addResponse(const char* format, ...) { //...表示可变参数
+bool HttpConn::addResponse(const char* format, ...) { //...表示可变参数
     // 首先检查 m_writeIdx 是否超过了写缓冲区的大小 WRITE_BUFFER_SIZE。如果超过了,说明写缓冲区已满,无法添加更多的响应数据,因此返回 false。
     if(m_writeIdx>=WRITE_BUFFER_SIZE)
         return false;
@@ -613,36 +632,36 @@ bool HttpCoon::addResponse(const char* format, ...) { //...表示可变参数
     m_writeIdx += len;
     va_end(argList);
 
-    // LOG_INFO("Request: %s", m_writeBuf); todo
+    LOG_INFO("Request: %s", m_writeBuf); 
 
     // 最后,函数返回 true,表示响应数据已经成功添加到写缓冲区中。
     return true;
 }
 
-bool HttpCoon::addStatusLine(int status, const char* title) {
+bool HttpConn::addStatusLine(int status, const char* title) {
     return addResponse("%s %d %s\r\n", "HTTP/1.1", status, title);
 }
 
-bool HttpCoon::addHeaders(int contentLength) {
+bool HttpConn::addHeaders(int contentLength) {
     return addContentLength(contentLength) && addLinger() && addBlankLine();
 }
 
-bool HttpCoon::addContent(const char* content) {
+bool HttpConn::addContent(const char* content) {
     return addResponse("s", content);
 }
 
-bool HttpCoon::addContentType() {
+bool HttpConn::addContentType() {
     return addResponse("Content-Type: %s\r\n", "text/html");
 }
 
-bool HttpCoon::addContentLength(int contentLength) {
+bool HttpConn::addContentLength(int contentLength) {
     return addResponse("Content-Length: %d\r\n", contentLength);
 }
 
-bool HttpCoon::addLinger() {
+bool HttpConn::addLinger() {
     return addResponse("Connection:%s\r\n",(m_linger==true)?"keep-alive":"close");
 }
 
-bool HttpCoon::addBlankLine() {
+bool HttpConn::addBlankLine() {
     return addResponse("%s", "\r\n");
 }
